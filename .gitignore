@@ -34,6 +34,10 @@ luac.out
 # Test deps (plenary.nvim)
 deps/
 
+# Temp/test files
+log.txt
+test.c
+
 # Executables
 *.exe
 *.out

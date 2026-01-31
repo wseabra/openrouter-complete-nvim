@@ -12,7 +12,7 @@ local root = vim.fn.fnamemodify(script, ":p:h")
 vim.opt.rtp:prepend(root)
 
 require("openrouter-complete").setup({
-  model = "openai/gpt-oss-safeguard-20b",
+  model = "google/gemma-3n-e4b-it",
   enable_on_startup = true,    -- plugin enabled when Neovim starts
   auto_trigger = true,       -- request suggestions on TextChangedI (debounced)
   log_file = "log.txt",              -- path to log file (empty = no logging)
