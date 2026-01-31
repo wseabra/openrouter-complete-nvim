@@ -31,6 +31,9 @@ luac.out
 *.so.*
 *.dylib
 
+# Test deps (plenary.nvim)
+deps/
+
 # Executables
 *.exe
 *.out
