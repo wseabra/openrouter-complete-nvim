@@ -2,41 +2,61 @@ local config = require("openrouter-complete.config")
 local context = require("openrouter-complete.context")
 local api = require("openrouter-complete.api")
 local suggestion = require("openrouter-complete.suggestion")
+local scheduler = require("openrouter-complete.scheduler")
 
 local M = {}
 
-local function request_suggestion()
+-- Used to ignore stale completion responses (e.g. after debounced re-trigger).
+local current_request_id = 0
+
+local function do_request(request_id)
   local bufnr = vim.api.nvim_get_current_buf()
+  if not config.is_enabled() or not config.is_filetype_allowed(bufnr) then
+    return
+  end
   suggestion.dismiss(bufnr)
   local pos = vim.api.nvim_win_get_cursor(0)
   local mode = vim.api.nvim_get_mode().mode
   local line_idx = pos[1]
   local col_idx = pos[2]
 
-  -- In normal mode, the cursor is ON a character. We want to complete AFTER it.
-  -- In insert mode, the cursor is BETWEEN characters.
   local display_col = col_idx
   if mode:sub(1, 1) ~= "i" then
     display_col = col_idx + 1
   end
-
-  -- Context should include all characters up to the "insertion point"
-  -- For insert mode, that's col_idx characters.
-  -- For normal mode, if we are after the current char, it's col_idx + 1 characters.
   local context_col = display_col
-
   local ctx = context.build(bufnr, line_idx, context_col)
+  local cfg = config.get()
+  local opts
+  if cfg.stream then
+    opts = {
+      on_delta = function(accumulated_text)
+        vim.schedule_wrap(function()
+          if vim.api.nvim_buf_is_valid(bufnr) and request_id == current_request_id and accumulated_text and accumulated_text ~= "" then
+            suggestion.update_current(bufnr, line_idx, display_col + 1, accumulated_text)
+          end
+        end)()
+      end,
+    }
+  end
   api.request_completions(ctx, function(suggestions)
+    if request_id ~= current_request_id then
+      return
+    end
     if not suggestions or #suggestions == 0 then
       return
     end
     vim.schedule_wrap(function()
-      if vim.api.nvim_buf_is_valid(bufnr) then
-        -- display_col + 1 to convert to 1-based for suggestion.lua
+      if vim.api.nvim_buf_is_valid(bufnr) and request_id == current_request_id then
         suggestion.set_suggestions(bufnr, suggestions, line_idx, display_col + 1)
       end
     end)()
-  end)
+  end, opts)
+end
+
+local function request_suggestion()
+  current_request_id = scheduler.next_id()
+  do_request(current_request_id)
 end
 
 local function accept_suggestion()
@@ -88,14 +108,60 @@ function M.setup(opts)
   local cfg = config.get()
   local modes = { "n", "i" }
 
+  -- User commands: enable / disable / toggle / status
+  vim.api.nvim_create_user_command("OpenRouterEnable", function()
+    config.set_enabled(true)
+    vim.notify("[openrouter-complete] Enabled.", vim.log.levels.INFO)
+  end, { desc = "Enable OpenRouter completions" })
+  vim.api.nvim_create_user_command("OpenRouterDisable", function()
+    config.set_enabled(false)
+    suggestion.dismiss()
+    vim.notify("[openrouter-complete] Disabled.", vim.log.levels.INFO)
+  end, { desc = "Disable OpenRouter completions" })
+  vim.api.nvim_create_user_command("OpenRouterToggle", function()
+    config.set_enabled(not config.is_enabled())
+    if not config.is_enabled() then
+      suggestion.dismiss()
+    end
+    vim.notify("[openrouter-complete] " .. (config.is_enabled() and "Enabled" or "Disabled") .. ".", vim.log.levels.INFO)
+  end, { desc = "Toggle OpenRouter completions" })
+  vim.api.nvim_create_user_command("OpenRouterStatus", function()
+    local status = config.is_enabled() and "enabled" or "disabled"
+    vim.notify("[openrouter-complete] Status: " .. status, vim.log.levels.INFO)
+  end, { desc = "Show OpenRouter completion status" })
+
   -- Clear suggestions when cursor moves or text changes
   local group = vim.api.nvim_create_augroup("openrouter-complete", { clear = true })
   vim.api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI", "InsertCharPre", "BufLeave" }, {
     group = group,
     callback = function()
-      suggestion.dismiss()
+      if suggestion.has_suggestion() then
+        suggestion.dismiss()
+      end
     end,
   })
+
+  -- Auto-trigger: debounced completion on TextChangedI when enabled and filetype allowed
+  if cfg.auto_trigger then
+    vim.api.nvim_create_autocmd("TextChangedI", {
+      group = group,
+      callback = function()
+        if not config.is_enabled() or not config.is_filetype_allowed(vim.api.nvim_get_current_buf()) then
+          return
+        end
+        scheduler.trigger(function(rid)
+          current_request_id = rid
+          do_request(rid)
+        end)
+      end,
+    })
+    vim.api.nvim_create_autocmd("BufLeave", {
+      group = group,
+      callback = function()
+        scheduler.cancel()
+      end,
+    })
+  end
 
   if cfg.request and cfg.request ~= "" then
     vim.keymap.set(modes, cfg.request, request_suggestion, { silent = true, desc = "OpenRouter: request suggestion" })
